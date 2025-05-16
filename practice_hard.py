@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QSlider, QLineEdit,
     QStackedLayout, QAction, QDialog, QDialogButtonBox,
-    QFormLayout, QSpinBox
+    QFormLayout, QSpinBox, QInputDialog
 )
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtCore import Qt, QEvent, QUrl, pyqtSignal, QTimer
@@ -408,9 +408,11 @@ class AudioPlayer(QMainWindow):
 
     def _save_current_range(self):
         start = self.start_in.text().strip()
-        end = self.end_in.text().strip()
+        end   = self.end_in.text().strip()
         if not start or not end:
             return
+
+        # validate time strings
         try:
             def to_ms(t):
                 if ':' in t:
@@ -421,7 +423,27 @@ class AudioPlayer(QMainWindow):
             _ = to_ms(end)
         except:
             return
-        idx = next((i for i, (s, e) in enumerate(self.range_presets) if not s or not e), 0)
+
+        # find empty slot(s)
+        empty = [i for i, (s, e) in enumerate(self.range_presets) if not s or not e]
+        if empty:
+            idx = empty[0]
+        else:
+            # all slots full: ask the user which one to overwrite
+            slot, ok = QInputDialog.getInt(
+                self,
+                "Overwrite Range Preset",
+                "All 3 range presets are used.\nSelect preset slot to overwrite (1–3):",
+                1,    # default value
+                1,    # minimum
+                len(self.range_presets),  # maximum (3)
+                1     # step
+            )
+            if not ok:
+                return
+            idx = slot - 1
+
+        # save into chosen slot
         self.range_presets[idx] = (start, end)
         self._refresh_range_presets_ui()
         self._store_presets()
