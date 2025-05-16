@@ -126,3 +126,5 @@ pyinstaller \
 ## 📄 License
 
 MIT License
+
+Created by GM7595 (part_time_metalhead)
