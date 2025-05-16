@@ -31,6 +31,29 @@ With an intuitive UI and robust preset features, it supercharges your practice s
 
 ---
 
+## 🗃️ Release
+
+The latest release can be found on the [Releases page](https://github.com/yourusername/PracticeHard/releases).
+
+**How to get started:**
+1. Download the latest release archive (`.zip` or `.tar.gz`) from the Releases page.
+2. Extract the files to your preferred directory.
+3. Install dependencies:
+   ```bash
+   pip install PyQt5 mutagen
+   ```
+4. Run the app:
+   ```bash
+   python practice_hard.py
+   ```
+
+**Changelog:**  
+See [CHANGELOG.md](CHANGELOG.md) for details on new features, bug fixes, and updates.
+
+*If there is no release yet, stay tuned! The first official release is coming soon.*
+
+---
+
 ## 🛠️ Installation
 
 ```bash
