@@ -80,7 +80,7 @@ pip install PyQt5 mutagen
 **Single-line command** (avoids shell prompts):
 
 ```bash
-pyinstaller --windowed --name "Practice Hard!" --icon practice_hard.icns practice_hard.py
+pyinstaller --windowed --name 'Practice Hard!' --icon practice_hard.icns practice_hard.py
 ```
 
 **Multi-line command**:
@@ -88,7 +88,7 @@ pyinstaller --windowed --name "Practice Hard!" --icon practice_hard.icns practic
 ```bash
 pyinstaller \
   --windowed \
-  --name PracticeHard \
+  --name 'Practice Hard!' \
   --icon practice_hard.icns \
   practice_hard.py
 ```
