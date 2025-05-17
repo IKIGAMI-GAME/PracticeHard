@@ -490,6 +490,11 @@ class AudioPlayer(QMainWindow):
         self.player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
         self.current_path = path
         self.original_path = path
+        self.slice_start = 0
+        self.slice_end = None
+        self.duration = 0
+        self.back_btn.setEnabled(False)
+        self.play_btn.setText("▶")
         base = os.path.splitext(os.path.basename(path))[0]
         meta = MutagenFile(path, easy=True)
         artist = (meta.tags.get("artist") or ["Unknown"])[0] if meta and meta.tags else "Unknown"
