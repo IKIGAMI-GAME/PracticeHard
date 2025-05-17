@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QSlider, QLineEdit,
     QStackedLayout, QAction, QDialog, QDialogButtonBox,
-    QFormLayout, QSpinBox, QInputDialog
+    QFormLayout, QSpinBox, QInputDialog, QMenu
 )
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtCore import Qt, QEvent, QUrl, pyqtSignal, QTimer
@@ -20,6 +20,10 @@ from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, APIC
 from mutagen.mp4 import MP4, MP4Cover
 from mutagen.oggvorbis import OggVorbis
+
+
+from pydub import AudioSegment
+import tempfile
 
 
 # ─────────────────────────── Range Preset Editor ───────────────────────────
@@ -131,6 +135,7 @@ QSlider::handle:horizontal{width:0px;height:0px;margin:0px;}'''
 
 
 # ───────────────────────────────── Main ──────────────────────────────────────
+BUFFER_MS = 250
 class AudioPlayer(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -142,26 +147,39 @@ class AudioPlayer(QMainWindow):
         docs = Path.home() / "Documents" / "Practice Hard"
         docs.mkdir(parents=True, exist_ok=True)
         self.presets_file = str(docs / "presets.json")
+
+        # ── FIX: always load (or create) the presets dictionary ──────────────
         try:
-            with open(self.presets_file, 'r') as f:
-                self.presets_data = json.load(f)
-        except:
+            with open(self.presets_file, "r") as fp:
+                self.presets_data = json.load(fp)
+        except (FileNotFoundError, json.JSONDecodeError):
             self.presets_data = {}
+        # ---------------------------------------------------------------------
+
         self.current_key = None
 
         # presets
-        self.speed_presets = [20, 50, 80]
+        self.speed_presets = []
         self.range_presets = [("", "") for _ in range(3)]
-
+        self.skip_ms = 5_000          # ← / → jump             (already there)
+        self.slice_start = 0          # range start in ms on the ORIGINAL track
+        self.slice_end   = None       # range end  "
+        self.full_duration = 0        # duration of the original file
+        
         # player state
         self.player = QMediaPlayer()
+        self.player.setNotifyInterval(5)          # <— new (default is 1000)
         self.duration = 0
         self.start_pos = self.end_pos = None
         self.scrubbing = False
 
         # signals
+        self.full_duration = 0 
         self.player.durationChanged.connect(self._duration_changed)
+        self.player.durationChanged.connect(self._store_full_len)   # NEW
         self.player.mediaStatusChanged.connect(self._media_status)
+        # fine-grained UI refresh every decoded packet
+        self.player.positionChanged.connect(self._ui_pos_changed)
 
         # UI setup
         central = QWidget(self)
@@ -184,9 +202,34 @@ class AudioPlayer(QMainWindow):
         # Global event filter & refresh timer
         QApplication.instance().installEventFilter(self)
         self.tick = QTimer(self)
-        self.tick.setInterval(40)
+        self.tick.setInterval(100)
         self.tick.timeout.connect(self._refresh_ui)
         self.tick.start()
+        
+        self._refresh_settings_menu()      # SETTINGS appears once at start‐up
+        self._skip_pos_updates = 0          # ignore-N-next positionChanged events
+        
+        # remember play-state across slice switches
+        self._resume_after_slice = False
+        self.player.mediaStatusChanged.connect(self._resume_if_needed)
+
+
+    def _update_slider_and_time(self, player_pos_ms: int):
+        """Update progress bar + time label using the *full* song scale."""
+        if self.slice_end is not None:
+            display_pos = self.slice_start + player_pos_ms
+            total_ms    = self.full_duration          # full song length
+        else:
+            display_pos = player_pos_ms
+            total_ms    = self.full_duration or player_pos_ms
+
+        self.progress.blockSignals(True)
+        self.progress.setValue(display_pos)
+        self.progress.blockSignals(False)
+
+        self.time_lbl.setText(
+            f"{self._fmt(display_pos)} / {self._fmt(total_ms)}"
+        )
 
     # New helper to parse time strings
     def _parse_time(self, text: str) -> int:
@@ -199,15 +242,27 @@ class AudioPlayer(QMainWindow):
                 return None
         return int(t)*1000 if t.isdigit() else None
 
-    # Handles applying a preset directly
     def _apply_preset(self, ss, ee):
-        st = self._parse_time(ss)
-        ed = self._parse_time(ee)
-        if st is None or ed is None or st >= ed:
+        """
+        Clicking a range-preset:
+        • fills the text boxes
+        • applies the slice
+        • keeps whatever play/stop state we were in
+        """
+        if not (ss and ee):            # blank preset
             return
-        self.start_pos, self.end_pos = st, ed
-        self.player.setPosition(st)
-        self._update_loop_overlay()
+
+        # fill the two entry boxes so the UI shows the choice
+        self.start_in.setText(ss)
+        self.end_in.setText(ee)
+
+        # was the player running?
+        was_playing = self.player.state() == QMediaPlayer.PlayingState
+
+        # render + loop the slice (this always resets the backend)
+        self._apply_range()
+
+
 
     def _build_header(self):
         self.label = QLabel("← it's time to practice…", self)
@@ -237,21 +292,29 @@ class AudioPlayer(QMainWindow):
         )
         self.set_range.clicked.connect(self._apply_range)
 
-        self.save_range_btn = QPushButton("SAVE", self)
+        self.save_range_btn = QPushButton("SET", self)
         self.save_range_btn.setFixedSize(40, 40)
         self.save_range_btn.setEnabled(False)
         self.save_range_btn.setStyleSheet(
             "font-size:16px;background:#FFC107;color:#000;border-radius:5px"
         )
-        self.save_range_btn.clicked.connect(self._save_current_range)
+        
+        self.back_btn = QPushButton("FULL", self)
+        self.back_btn.setFixedSize(40, 40)
+        self.back_btn.setEnabled(False)
+        self.back_btn.setStyleSheet(
+            "font-size:16px;background:#ff0000;color:#fff;border-radius:5px")
+        self.back_btn.clicked.connect(self._restore_full_track)
 
-        row = QHBoxLayout()
+        row = QHBoxLayout()                      # define row **before** use
         row.addWidget(QLabel("RANGE:"))
         row.addWidget(self.start_in)
         row.addWidget(QLabel("→"))
         row.addWidget(self.end_in)
         row.addWidget(self.set_range)
         row.addWidget(self.save_range_btn)
+        row.addWidget(self.back_btn)             # now safe
+        self.save_range_btn.clicked.connect(self._save_current_range)
         self.main.addLayout(row)
 
     def _build_cover(self):
@@ -280,9 +343,9 @@ class AudioPlayer(QMainWindow):
         self.progress.sliderPressed.connect(lambda: setattr(self, "scrubbing", True))
         self.progress.sliderReleased.connect(self._seek_released)
         self.progress.sliderMoved.connect(self._seek_moved)
-        self.progress.sliderClicked.connect(self._seek_clicked)
 
         self.loop_overlay = LoopOverlay(self.progress)
+        self.loop_overlay.setGeometry(0, 0, self.progress.width(), self.progress.height())  # NEW
         self.progress.installEventFilter(self)
 
         mono = QFont("Courier New", 10)
@@ -341,40 +404,61 @@ class AudioPlayer(QMainWindow):
         self.main.addLayout(self.range_preset_row)
 
     def _refresh_presets_ui(self, first_time=False):
-        # speed slider update
-        max_val = max(100, *self.speed_presets)
+        # ------------------------------------------------------------------
+        # make sure speed_presets is always a LIST before using “*”
+        if isinstance(self.speed_presets, int):
+            self.speed_presets = [self.speed_presets]
+        elif self.speed_presets is None:
+            self.speed_presets = []
+        # ------------------------------------------------------------------
+
+        # speed-slider range & label
+        max_val = max(100, *self.speed_presets) if self.speed_presets else 100
         self.spd.setRange(1, max_val)
         self.spd.setValue(100 if first_time else min(self.spd.value(), max_val))
         self.slbl.setText(f"{self.spd.value()}%")
 
-        # build menu
-        self.menuBar().clear()
-        menu = self.menuBar().addMenu("PRESETS")
-        # Speed presets submenu
-        speed_menu = menu.addMenu("Speed Presets")
-        for v in self.speed_presets:
-            speed_menu.addAction(QAction(f"{v}%", self, triggered=lambda _, vv=v: self.spd.setValue(vv)))
-        # Range presets submenu
-        range_menu = menu.addMenu("Range Presets")
-        for s, e in self.range_presets:
-            if s and e:
-                label = f"{s} → {e}"
-                range_menu.addAction(QAction(label, self, triggered=lambda _, ss=s, ee=e: (self.start_in.setText(ss), self.end_in.setText(ee))))
-        # Edit actions
-        menu.addSeparator()
-        menu.addAction(QAction("Edit Speed…", self, triggered=self._edit_presets))
-        menu.addAction(QAction("Edit Ranges…", self, triggered=self._edit_ranges))
-
-        # refresh speed presets row
+        # refresh the on-screen SPEED PRESETS buttons
         while self.preset_row.count() > 1:
-            item = self.preset_row.takeAt(1)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
+            w = self.preset_row.takeAt(1).widget()
+            if w:
+                w.deleteLater()
         for v in self.speed_presets:
             btn = QPushButton(f"{v}%", self)
             btn.clicked.connect(lambda _, vv=v: self.spd.setValue(vv))
             self.preset_row.addWidget(btn)
+
+    
+    def _refresh_settings_menu(self):
+        """Single SETTINGS menu with labels that reflect current values."""
+        if m := self.menuBar().findChild(QMenu, "SETTINGS_MENU"):
+            self.menuBar().removeAction(m.menuAction())
+
+        settings = self.menuBar().addMenu("SETTINGS")
+        settings.setObjectName("SETTINGS_MENU")
+
+        # 1) skip
+        settings.addAction(
+            QAction(f"Edit Skip…  (current: {self.skip_ms // 1000}s)",
+                    self, triggered=self._edit_skip)
+        )
+
+        # 2) speed presets
+        cur_speed = " / ".join(f"{v}%" for v in self.speed_presets) or "none"
+        settings.addAction(
+            QAction(f"Edit Speed Presets…  (current: {cur_speed})",
+                    self, triggered=self._edit_presets)
+        )
+
+        # 3) range presets
+        filled = sum(1 for s, e in self.range_presets if s and e)
+        settings.addAction(
+            QAction(f"Edit Range Presets…  (current: {filled} set)",
+                    self, triggered=self._edit_ranges)
+        )
+
+
+
 
     def _refresh_range_presets_ui(self):
         # clear old
@@ -462,13 +546,50 @@ class AudioPlayer(QMainWindow):
             pass
 
     def eventFilter(self, src, ev):
-        if ev.type() == QEvent.KeyPress and ev.key() == Qt.Key_Space:
-            self._toggle_play()
-            return True
-        if src is self.progress and ev.type() == QEvent.Resize:
-            self.loop_overlay.resize(self.progress.size())
-            self.loop_overlay.update()
+        # --- keyboard shortcuts (unchanged) ---------------------------------
+        if ev.type() == QEvent.KeyPress and not isinstance(src, QLineEdit):
+            key = ev.key()
+            if key == Qt.Key_Space:
+                self._toggle_play();  return True
+            if key == Qt.Key_Left:
+                self._skip(-self.skip_ms);  return True
+            if key == Qt.Key_Right:
+                self._skip(self.skip_ms);   return True
+            if key == Qt.Key_R:
+                self.player.setPosition(0); return True
+
+        # --- keep LoopOverlay sized & positioned ----------------------------
+        if src is self.progress and ev.type() in (QEvent.Resize, QEvent.Move):
+            self.loop_overlay.setGeometry(0, 0,
+                                        self.progress.width(),
+                                        self.progress.height())
+            self.loop_overlay.update()      # repaint immediately
+            return False
+
         return super().eventFilter(src, ev)
+
+    def _skip(self, delta_ms: int):
+        """Jump by ±delta_ms on the *full* timeline, clamped correctly."""
+        if self.full_duration == 0:
+            return
+
+        # current position expressed on the full track
+        cur_full = self._slice_to_full(self.player.position())
+        new_full = max(0, min(self.full_duration, cur_full + delta_ms))
+
+        # map back to the player’s local timeline and seek
+        self.player.setPosition(self._full_to_slice(new_full))
+
+    def _edit_skip(self):
+        """Open a dialog to set ←/→ jump size (1-60 s)."""
+        secs, ok = QInputDialog.getInt(
+            self, "Skip interval",
+            "Jump amount for ← / →  (seconds):",
+            self.skip_ms // 1000, 1, 60, 1
+        )
+        if ok:
+            self.skip_ms = secs * 1000
+            self._refresh_settings_menu()
 
     def _open_file(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -479,6 +600,10 @@ class AudioPlayer(QMainWindow):
             return
         # load media
         self.player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
+        self.current_path  = path
+        self.original_path = path
+        self.full_duration = self.player.duration()  # <- NEW
+        self._refresh_ui()                           # update slider range
         base = os.path.splitext(os.path.basename(path))[0]
         # extract metadata for key
         meta = MutagenFile(path, easy=True)
@@ -488,9 +613,24 @@ class AudioPlayer(QMainWindow):
         self.current_key = key
         # load presets for this song
         song_presets = self.presets_data.get(key, {})
-        self.speed_presets = song_presets.get('speed_presets', [20, 50, 80])
+        self.speed_presets = song_presets.get('speed_presets', [])
         self.range_presets = song_presets.get('range_presets', [("", ""),("", ""),("", "")])
+        
         # update UI
+        # ---------- normalise & apply speed presets --------------------------
+        sp = song_presets.get("speed_presets", [])
+
+        # old files: single int → wrap in list
+        if isinstance(sp, int):
+            sp = [sp]
+
+        # brand-new song with no presets saved yet → use placeholders
+        if not sp:
+            sp = [20, 50, 80]
+
+        self.speed_presets = sp
+        # ---------------------------------------------------------------------
+
         self._refresh_presets_ui(first_time=True)
         self._refresh_range_presets_ui()
 
@@ -549,62 +689,163 @@ class AudioPlayer(QMainWindow):
             self.play_btn.setText("⏸")
 
     def _seek_moved(self, v):
-        self.time_lbl.setText(f"{self._fmt(v)} / {self._fmt(self.duration)}")
+        if not self.scrubbing:              # first movement → pause audio
+            self.scrubbing = True
+            self.player.pause()
+
+        if self.slice_end is not None:               # clamp to slice
+            v = max(self.slice_start, min(self.slice_end, v))
+            self.progress.blockSignals(True)
+            self.progress.setValue(v)
+            self.progress.blockSignals(False)
+
+        self.time_lbl.setText(
+            f"{self._fmt(v)} / {self._fmt(self.full_duration)}"
+        )
+
 
     def _seek_released(self):
-        self.player.setPosition(self.progress.value())
-        self.scrubbing = False
+        # Where the knob ended on the *full* timeline
+        full_target = self.progress.value()
+        if self.slice_end is not None:
+            full_target = max(self.slice_start,
+                            min(self.slice_end, full_target))
 
-    def _seek_clicked(self, v):
-        self.player.setPosition(v)
+        slice_pos = self._full_to_slice(full_target)
 
+        # perform a single, definitive seek
+        self._skip_pos_updates = 2          # ignore stale backend frames
+        self.player.setPosition(slice_pos)
+        self._update_slider_and_time(slice_pos)
+
+        self.scrubbing = False              # re-enable UI refresh
+        self.player.play()
+
+
+
+    # ❹ UI timer now only runs when paused or scrubbing
     def _refresh_ui(self):
-        if self.scrubbing or not self.duration:
-            return
-        pos = self.player.position()
-        if self.end_pos is not None and pos >= self.end_pos:
-            self.player.setPosition(self.start_pos)
-            return
-
-        self.progress.blockSignals(True)
-        self.progress.setValue(pos)
-        self.progress.blockSignals(False)
-        self.time_lbl.setText(f"{self._fmt(pos)} / {self._fmt(self.duration)}")
+        # Update UI only when paused *and not dragging*
+        if self.player.state() != QMediaPlayer.PlayingState and not self.scrubbing:
+            self._update_slider_and_time(self.player.position())
 
     def _duration_changed(self, d):
         self.duration = d
-        self.progress.setRange(0, d)
+        self.progress.setRange(0, self.full_duration)
         self.progress.setValue(0)
         self.time_lbl.setText(f"{self._fmt(0)} / {self._fmt(d)}")
         self._update_loop_overlay()
-
+        
+    def _on_duration_changed(self, dur_ms: int):
+        """Store full length only while the ORIGINAL track is loaded."""
+        if self.slice_end is None:            # playing the full track
+            self.full_duration = dur_ms
+            self.progress.setRange(0, dur_ms)
+            self._update_slider_and_time(self.player.position())
+            
     def _media_status(self, status):
-        if status == QMediaPlayer.EndOfMedia and self.end_pos is None:
-            self.player.setPosition(0)
+        if status == QMediaPlayer.EndOfMedia:
+            self.player.setPosition(0)      # restart *whatever* is loaded
             self.player.play()
 
     def _apply_range(self):
-        def to_ms(text):
-            t = text.strip()
-            if ':' in t:
-                try:
-                    m, s = map(int, t.split(':'))
-                    return (m * 60 + s) * 1000
-                except ValueError:
-                    return None
-            return int(t) * 1000 if t.isdigit() else None
-
-        st = to_ms(self.start_in.text())
-        ed = to_ms(self.end_in.text())
+        """Render the selected slice and loop it; resume only if we were playing."""
+        st = self._parse_time(self.start_in.text())
+        ed = self._parse_time(self.end_in.text())
         if st is None or ed is None or st >= ed:
             return
 
-        self.start_pos, self.end_pos = st, ed
-        self.player.setPosition(st)
+        # remember whether the user was listening
+        resume_after = self.player.state() == QMediaPlayer.PlayingState
+
+        # store slice markers for UI
+        self.slice_start, self.slice_end = st, ed
+
+        # --- render the slice once ---------------------------------------
+        seg = AudioSegment.from_file(self.current_path)[st:ed]
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        seg.export(tmp.name, format="wav")
+
+        # --- loop that slice endlessly -----------------------------------
+        from PyQt5.QtMultimedia import QMediaPlaylist
+        pl = QMediaPlaylist()
+        pl.addMedia(QMediaContent(QUrl.fromLocalFile(tmp.name)))
+        pl.setPlaybackMode(QMediaPlaylist.CurrentItemInLoop)
+
+        self.player.setPlaylist(pl)         # backend stops & starts loading
+
+        # UI housekeeping
+        self.duration = len(seg)
+        self.progress.setRange(0, self.full_duration)
+        self._update_loop_overlay()
+        self.back_btn.setEnabled(True)
+
+        self._resume_after_slice = resume_after     # use the pre-slice state
+
+
+
+    
+    def _restore_full_track(self):
+        if not self.original_path:
+            return
+        self.player.stop()
+        self.player.setMedia(QMediaContent(QUrl.fromLocalFile(self.original_path)))
+        self.player.play()
+
+        self.slice_start = 0          # NEW
+        self.slice_end   = None
+        self.duration = self.full_duration
+        self.progress.setRange(0, self.full_duration)
+        self.back_btn.setEnabled(False)
         self._update_loop_overlay()
 
+        
     def _update_loop_overlay(self):
-        self.loop_overlay.set_loop(self.start_pos, self.end_pos, self.duration)
+        if self.slice_end is not None:
+            self.loop_overlay.set_loop(self.slice_start,
+                                    self.slice_end,
+                                    self.full_duration)
+        else:
+            self.loop_overlay.set_loop(None, None, 0)
+        self.loop_overlay.update()          # NEW – draw right away
+
+   
+    # ───────────────────── UI-only position callback ─────────────────────
+    def _ui_pos_changed(self, pos: int):
+        """Called every few ms while audio plays; never seeks."""
+        if self._skip_pos_updates:           # ignore the first stale events
+            self._skip_pos_updates -= 1
+            return
+        if not self.scrubbing:               # let the user drag unhindered
+            self._update_slider_and_time(pos)
+
+    def _store_full_len(self, dur_ms: int):
+        """Called whenever a *new* media source is loaded.
+        We keep the first duration (full song) and ignore later slice files."""
+        if self.slice_end is None:                 # meaning: whole track playing
+            self.full_duration = dur_ms
+            self.progress.setRange(0, dur_ms)
+
+    # ----------------------------------------------------------------------
+    def _full_to_slice(self, full_ms: int) -> int:
+        """Convert a full-song timestamp to the slice’s local timeline."""
+        if self.slice_end is None:
+            return full_ms                      # playing original track
+        return max(0, min(self.slice_end, full_ms) - self.slice_start)
+
+    def _slice_to_full(self, slice_ms: int) -> int:
+        """Convert slice-relative ms to full-song ms."""
+        if self.slice_end is None:
+            return slice_ms
+        return self.slice_start + slice_ms
+    # ----------------------------------------------------------------------
+    
+    def _resume_if_needed(self, status):
+        """Resume playback after the slice has fully loaded."""
+        if status == QMediaPlayer.LoadedMedia and self._resume_after_slice:
+            self._resume_after_slice = False          # one-shot
+            self.player.play()
+            self.play_btn.setText("⏸")               # keep UI in sync
 
     @staticmethod
     def _fmt(ms):
