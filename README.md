@@ -37,24 +37,6 @@ The latest release can be found on the [Releases page](https://github.com/IKIGAM
 
 ---
 
-## 🖥️ Packaging as a Standalone Application (macOS only)
-
-1. Install PyInstaller if you haven't already:
-
-   ```bash
-   pip install pyinstaller
-   ```
-2. Place the macOS icon file `practice_hard.icns` in the project root.
-3. Build the app bundle with one of the following methods:
-
-**Single-line command** (avoids shell prompts):
-
-```bash
-pyinstaller --windowed --name 'Practice Hard!' --icon practice_hard.icns practice_hard.py
-```
-
-4. After building, you’ll find the app in the `dist/` folder. The resulting `.app` includes Python and all necessary dependencies (e.g. PyQt5, mutagen), so users can run it directly without installing anything.
-
 ## 🤝 Contributing
 
 * Issues and PRs are welcome!
