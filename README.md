@@ -83,17 +83,7 @@ pip install PyQt5 mutagen
 pyinstaller --windowed --name 'Practice Hard!' --icon practice_hard.icns practice_hard.py
 ```
 
-**Multi-line command**:
-
-```bash
-pyinstaller \
-  --windowed \
-  --name 'Practice Hard!' \
-  --icon practice_hard.icns \
-  practice_hard.py
-```
-
-4. After building, you’ll find `PracticeHard.app` in the `dist/` folder. You can distribute this `.app` directly without requiring users to install Python or dependencies.
+4. After building, you’ll find the app in the `dist/` folder. You can distribute this `.app` directly without requiring users to install Python or dependencies.
 
 ### Windows (using PyInstaller)
 
@@ -112,7 +102,7 @@ pyinstaller \
      --icon "practice_hard.ico" \
      practice_hard.py
    ```
-4. After building, you’ll find `PracticeHard.exe` and its supporting files in the `dist/PracticeHard/` directory. Share this folder with Windows users to run the app standalone.
+4. After building, you’ll find the exe and its supporting files in the `dist/Practice Hard!/` directory. Share this folder with Windows users to run the app standalone.
 
 ---
 
