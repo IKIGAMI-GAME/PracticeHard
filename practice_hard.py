@@ -38,6 +38,29 @@ from mutagen.mp4 import MP4, MP4Cover
 from mutagen.oggvorbis import OggVorbis
 from pydub import AudioSegment
 
+# ---- Set pydub ffmpeg path for PyInstaller ----
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    # Running in a PyInstaller bundle (frozen)
+    ffmpeg_path = os.path.join(sys._MEIPASS, 'ffmpeg')
+    ffprobe_path = os.path.join(sys._MEIPASS, 'ffprobe')
+
+    # Check if bundled ffmpeg exists, otherwise pydub might still try PATH
+    if os.path.exists(ffmpeg_path):
+        AudioSegment.converter = ffmpeg_path
+        print(f"pydub: Using bundled ffmpeg at: {ffmpeg_path}")
+    else:
+        print(f"pydub: Bundled ffmpeg NOT FOUND at: {ffmpeg_path}")
+
+    if os.path.exists(ffprobe_path):
+        AudioSegment.ffprobe = ffprobe_path # pydub uses this specific attribute
+        print(f"pydub: Using bundled ffprobe at: {ffprobe_path}")
+    else:
+        print(f"pydub: Bundled ffprobe NOT FOUND at: {ffprobe_path}")
+else:
+    # Running as a normal script
+    print("pydub: Not running in PyInstaller bundle, relying on system PATH for ffmpeg/ffprobe.")
+# ---- End of pydub ffmpeg path setting ----
+
 # -----------------------------------------------------------------------------
 #   Styling constants
 # -----------------------------------------------------------------------------
