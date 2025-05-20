@@ -49,3 +49,9 @@ The latest release can be found on the [Releases page](https://github.com/IKIGAM
 MIT License
 
 Created by Taichi Sawamura
+
+
+
+memo
+
+pyinstaller --name 'Practice Hard!' --windowed --icon practice_hard.icns --add-binary '/opt/homebrew/bin/ffmpeg: .' practice_hard.py

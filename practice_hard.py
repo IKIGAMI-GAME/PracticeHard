@@ -608,7 +608,7 @@ class AudioPlayer(QMainWindow):
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         seg.export(tmp.name, format="wav")
         from PyQt5.QtMultimedia import QMediaPlaylist
-        pl = QMediaPlaylist()
+        pl = QMediaPlaylist(self.player)
         pl.addMedia(QMediaContent(QUrl.fromLocalFile(tmp.name)))
         pl.setPlaybackMode(QMediaPlaylist.CurrentItemInLoop)
         self.player.setPlaylist(pl)
