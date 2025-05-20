@@ -3,6 +3,7 @@ import os
 import json
 import base64
 import tempfile
+import traceback
 from pathlib import Path
 
 from PyQt5.QtWidgets import (
@@ -606,10 +607,24 @@ class AudioPlayer(QMainWindow):
         self.slice_start, self.slice_end = st, ed
         seg = AudioSegment.from_file(self.current_path)[st:ed]
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        seg.export(tmp.name, format="wav")
-        print(f"Temporary WAV file created at: {tmp.name}")
-        tmp.close()
-        from PyQt5.QtMultimedia import QMediaPlaylist
+
+        try:
+            seg.export(tmp.name, format="wav")
+            print(f"Temporary WAV file created at: {tmp.name}")
+            tmp.close()
+        except Exception as e:
+            print(f"ERROR during pydub export or file operations: {e}\nTraceback: {traceback.format_exc()}")
+            try:
+                # tmp.name should be defined from before the try block
+                if hasattr(tmp, 'name') and tmp.name and os.path.exists(tmp.name):
+                    os.remove(tmp.name)
+                    print(f"Cleaned up potentially corrupt temporary file: {tmp.name}")
+            except Exception as cleanup_e:
+                print(f"Error during cleanup of temporary file {tmp.name}: {cleanup_e}")
+            return # Exit the method
+
+        # If try block was successful, continue with player setup:
+        from PyQt5.QtMultimedia import QMediaPlaylist # Keep imports local if they are only used here
         pl = QMediaPlaylist()
         pl.addMedia(QMediaContent(QUrl.fromLocalFile(tmp.name)))
         pl.setPlaybackMode(QMediaPlaylist.CurrentItemInLoop)
