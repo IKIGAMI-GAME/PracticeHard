@@ -25,7 +25,7 @@ from PyQt5.QtWidgets import (
     QInputDialog,
     QMenu,
 )
-from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent, QMediaPlaylist
 from PyQt5.QtCore import Qt, QEvent, QUrl, pyqtSignal, QTimer
 from PyQt5.QtGui import QPixmap, QFont, QFontMetrics, QPainter, QPen, QColor
 
@@ -201,6 +201,7 @@ class AudioPlayer(QMainWindow):
         self._resume_after_slice = False
         self.current_path = ""
         self.original_path = ""
+        self._temp_files = []  # Track temp files for cleanup
 
         # Backend player -------------------------------------------------------------
         self.player = QMediaPlayer()
@@ -450,12 +451,19 @@ class AudioPlayer(QMainWindow):
         """Fill inputs and activate the selected range preset."""
         if not (ss and ee):
             return
-        self.start_in.setText(ss)
-        self.end_in.setText(ee)
-        was_playing = self.player.state() == QMediaPlayer.PlayingState
-        self._apply_range()
-        if was_playing and self.player.state() != QMediaPlayer.PlayingState:
-            self.player.play()
+        try:
+            self.start_in.setText(ss)
+            self.end_in.setText(ee)
+            was_playing = self.player.state() == QMediaPlayer.PlayingState
+            self._apply_range()
+            if was_playing and self.player.state() != QMediaPlayer.PlayingState:
+                self.player.play()
+        except Exception as e:
+            # Clear inputs on error and reset state
+            self.start_in.clear()
+            self.end_in.clear()
+            self.slice_start, self.slice_end = 0, None
+            return
 
     def _save_current_range(self):
         """Store the currently entered range into the first available preset slot."""
@@ -602,34 +610,69 @@ class AudioPlayer(QMainWindow):
         st, ed = self._parse_time(self.start_in.text()), self._parse_time(self.end_in.text())
         if st is None or ed is None or st >= ed:
             return
+        
+        # Check if we have a valid current path
+        if not self.current_path or not os.path.exists(self.current_path):
+            return
+            
         resume_after = self.player.state() == QMediaPlayer.PlayingState
         self.slice_start, self.slice_end = st, ed
-        seg = AudioSegment.from_file(self.current_path)[st:ed]
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        seg.export(tmp.name, format="wav")
-        from PyQt5.QtMultimedia import QMediaPlaylist
-        pl = QMediaPlaylist(self.player)
-        pl.addMedia(QMediaContent(QUrl.fromLocalFile(tmp.name)))
-        pl.setPlaybackMode(QMediaPlaylist.CurrentItemInLoop)
-        self.player.setPlaylist(pl)
-        self.duration = len(seg)
-        self.progress.setRange(0, self.full_duration)
-        self._update_loop_overlay()
-        self.back_btn.setEnabled(True)
-        self._resume_after_slice = resume_after
+        
+        tmp = None
+        try:
+            seg = AudioSegment.from_file(self.current_path)[st:ed]
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            seg.export(tmp.name, format="wav")
+            tmp.close()  # Close the file handle before using it
+            
+            pl = QMediaPlaylist(self.player)
+            pl.addMedia(QMediaContent(QUrl.fromLocalFile(tmp.name)))
+            pl.setPlaybackMode(QMediaPlaylist.CurrentItemInLoop)
+            self.player.setPlaylist(pl)
+            self.duration = len(seg)
+            self.progress.setRange(0, self.full_duration)
+            self._update_loop_overlay()
+            self.back_btn.setEnabled(True)
+            self._resume_after_slice = resume_after
+            
+            # Store temp file path for cleanup
+            if hasattr(self, '_temp_files'):
+                self._temp_files.append(tmp.name)
+            else:
+                self._temp_files = [tmp.name]
+                
+        except Exception as e:
+            # Clean up temp file if created
+            if tmp and hasattr(tmp, 'name'):
+                try:
+                    os.unlink(tmp.name)
+                except:
+                    pass  # Ignore cleanup errors
+            # Reset slice state on error
+            self.slice_start, self.slice_end = 0, None
+            return
 
     def _restore_full_track(self):
         """Return from sliced playback to the original file."""
         if not self.original_path:
             return
-        self.player.stop()
-        self.player.setMedia(QMediaContent(QUrl.fromLocalFile(self.original_path)))
-        self.player.play()
-        self.slice_start, self.slice_end = 0, None
-        self.duration = self.full_duration
-        self.progress.setRange(0, self.full_duration)
-        self.back_btn.setEnabled(False)
-        self._update_loop_overlay()
+        try:
+            self.player.stop()
+            self.player.setMedia(QMediaContent(QUrl.fromLocalFile(self.original_path)))
+            self.player.play()
+            self.slice_start, self.slice_end = 0, None
+            self.duration = self.full_duration
+            self.progress.setRange(0, self.full_duration)
+            self.back_btn.setEnabled(False)
+            self._update_loop_overlay()
+            # Clean up temp files when returning to full track
+            self._cleanup_temp_files()
+        except Exception as e:
+            # Ensure we reset state even on error
+            self.slice_start, self.slice_end = 0, None
+            self.back_btn.setEnabled(False)
+            self._cleanup_temp_files()
+            return
 
     def _update_loop_overlay(self):
         """Sync loop markers with current slice (if any)."""
@@ -702,10 +745,18 @@ class AudioPlayer(QMainWindow):
         if ":" in t:
             try:
                 m, s = map(int, t.split(":"))
+                if s >= 60 or s < 0 or m < 0:  # Validate seconds and minutes are within range
+                    return None
                 return (m * 60 + s) * 1000
             except ValueError:
                 return None
-        return int(t) * 1000 if t.isdigit() else None
+        try:
+            seconds = int(t)
+            if seconds < 0:  # Reject negative numbers
+                return None
+            return seconds * 1000
+        except ValueError:
+            return None
 
     def _full_to_slice(self, full_ms: int) -> int:
         """Translate full‑track timestamp to slice‑relative timestamp."""
@@ -747,6 +798,21 @@ class AudioPlayer(QMainWindow):
             self.loop_overlay.setGeometry(0, 0, self.progress.width(), self.progress.height())
             self.loop_overlay.update()
         return super().eventFilter(src, ev)
+
+    def closeEvent(self, event):
+        """Clean up temporary files when closing the application."""
+        self._cleanup_temp_files()
+        super().closeEvent(event)
+
+    def _cleanup_temp_files(self):
+        """Remove all temporary files created during audio processing."""
+        for temp_file in getattr(self, '_temp_files', []):
+            try:
+                if os.path.exists(temp_file):
+                    os.unlink(temp_file)
+            except:
+                pass  # Ignore cleanup errors
+        self._temp_files = []
 
 
 # -----------------------------------------------------------------------------
