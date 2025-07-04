@@ -745,12 +745,18 @@ class AudioPlayer(QMainWindow):
         if ":" in t:
             try:
                 m, s = map(int, t.split(":"))
-                if s >= 60:  # Validate seconds are within range
+                if s >= 60 or s < 0 or m < 0:  # Validate seconds and minutes are within range
                     return None
                 return (m * 60 + s) * 1000
             except ValueError:
                 return None
-        return int(t) * 1000 if t.isdigit() else None
+        try:
+            seconds = int(t)
+            if seconds < 0:  # Reject negative numbers
+                return None
+            return seconds * 1000
+        except ValueError:
+            return None
 
     def _full_to_slice(self, full_ms: int) -> int:
         """Translate full‑track timestamp to slice‑relative timestamp."""
